@@ -22,10 +22,6 @@ const THEMES = {
 const ORBIT_R = 120;
 const d = THREE.MathUtils.degToRad;
 
-/*
- * Island definitions
- * scaleMobile is ~85% of scaleDesktop so islands fit clearly on a narrow screen
- */
 const ISLAND_DEFS = [
   { x: 0,                          y: 30, z: 0,                          scaleDesktop: 58, scaleMobile: 50, file: 'Assets/middle.glb', isCenterIsland: true },
   { x: Math.cos(d(0))   * ORBIT_R, y: 20, z: Math.sin(d(0))   * ORBIT_R, scaleDesktop: 45, scaleMobile: 38, file: 'Assets/Floadting Island 1.glb' },
@@ -36,7 +32,6 @@ const ISLAND_DEFS = [
   { x: Math.cos(d(300)) * ORBIT_R, y: 25, z: Math.sin(d(300)) * ORBIT_R, scaleDesktop: 44, scaleMobile: 37, file: 'Assets/floating Island 6.glb' },
 ];
 
-/* ── Detect mobile ── */
 function isMobileDevice() {
   return (
     /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
@@ -46,62 +41,37 @@ function isMobileDevice() {
 
 /**
  * loadPanoramaTexture
- *
- * Loads your REAL panorama image (bg.png / light bg.png) and pre-scales it
- * inside a canvas before creating the WebGL texture.
- *
- * WHY: A 7680×3840 image exceeds mobile GPU texture limits (typically 4096px).
- * When Three.js tries to resize it internally it blocks the main thread and
- * causes the loading freeze you were seeing.  By downscaling in JS first the
- * GPU gets a texture that already fits — no resize, no freeze.
- *
- * Your actual panorama is still fully visible; 2048×1024 is indistinguishable
- * from 7680×3840 on any phone screen.
+ * Loads the real panorama but pre-scales it inside a canvas to the GPU's
+ * safe texture size limit before creating the Three.js texture.
+ * This avoids the "Texture has been resized" freeze on mobile GPUs.
  */
 function loadPanoramaTexture(url, isMobile, onSuccess, onError) {
   const MAX_PX = isMobile ? 2048 : 4096;
-
   const img = new Image();
   img.crossOrigin = 'anonymous';
-
   img.onload = () => {
     try {
       const aspect = img.naturalWidth / img.naturalHeight;
       let w = img.naturalWidth;
       let h = img.naturalHeight;
-
       if (w > MAX_PX || h > MAX_PX) {
         if (w >= h) { w = MAX_PX; h = Math.round(MAX_PX / aspect); }
         else        { h = MAX_PX; w = Math.round(MAX_PX * aspect); }
       }
-
       const canvas = document.createElement('canvas');
       canvas.width  = w;
       canvas.height = h;
       canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-
       const tex = new THREE.CanvasTexture(canvas);
       tex.mapping    = THREE.EquirectangularReflectionMapping;
       tex.colorSpace = THREE.SRGBColorSpace;
       onSuccess(tex);
-    } catch (e) {
-      onError(e);
-    }
+    } catch (e) { onError(e); }
   };
-
   img.onerror = onError;
-  img.src     = url;
+  img.src = url;
 }
 
-/**
- * useThreeScene
- *
- * Identical experience on desktop and mobile:
- *  - full panoramic background (your real bg.png, just pre-scaled)
- *  - all 7 islands visible, slightly smaller on mobile
- *  - same spinner → typing → delete → islands appear flow
- *  - same tap-to-focus / back interaction
- */
 export function useThreeScene(containerRef, callbacks) {
   const cbRef = useRef(callbacks);
   cbRef.current = callbacks;
@@ -123,7 +93,7 @@ export function useThreeScene(containerRef, callbacks) {
 
     /* ── Renderer ── */
     const renderer = new THREE.WebGLRenderer({
-      antialias: !mobile,                 // antialias costs GPU — disable on mobile
+      antialias: !mobile,
       powerPreference: 'high-performance',
     });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, mobile ? 1.0 : 1.5));
@@ -139,14 +109,11 @@ export function useThreeScene(containerRef, callbacks) {
     scene.fog = new THREE.FogExp2(THEMES.dark.fog, THEMES.dark.fogDensity);
 
     /* ── Camera ── */
-    // Pull back slightly on mobile so all islands fit in the narrower viewport
     const CAM_Y = mobile ? 180 : 160;
     const CAM_Z = mobile ? 280 : 220;
-    const FOV   = mobile ? 65  : 55;   // wider FOV shows more of the scene on phone
+    const FOV   = mobile ? 65  : 55;
 
-    const camera = new THREE.PerspectiveCamera(
-      FOV, container.clientWidth / container.clientHeight, 1, 20000
-    );
+    const camera = new THREE.PerspectiveCamera(FOV, container.clientWidth / container.clientHeight, 1, 20000);
     camera.position.set(0, CAM_Y, CAM_Z);
 
     /* ── Controls ── */
@@ -157,10 +124,7 @@ export function useThreeScene(containerRef, callbacks) {
     controls.maxPolarAngle = Math.PI / 2 - 0.05;
     controls.minDistance = 20;
     controls.maxDistance = 600;
-    controls.touches = {
-      ONE: THREE.TOUCH.ROTATE,
-      TWO: THREE.TOUCH.DOLLY_PAN,
-    };
+    controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
 
     /* ── Lights ── */
     const ambientLight = new THREE.AmbientLight(THEMES.dark.ambientColor, THEMES.dark.ambientIntensity);
@@ -175,7 +139,6 @@ export function useThreeScene(containerRef, callbacks) {
     dirLight.shadow.camera.left   = -200;
     dirLight.shadow.camera.near   = 0.1;
     dirLight.shadow.camera.far    = 500;
-    // Halve shadow map on mobile to save VRAM
     dirLight.shadow.mapSize.set(mobile ? 512 : 1024, mobile ? 512 : 1024);
     dirLight.shadow.bias = -0.001;
     scene.add(dirLight);
@@ -185,7 +148,6 @@ export function useThreeScene(containerRef, callbacks) {
     let panoReadyFired = false;
     let currentTheme   = 'dark';
 
-    // Only used if the real image fails to load (no connection, 404, etc.)
     function makeFallbackTexture(isDark) {
       const cv = document.createElement('canvas');
       cv.width = 2048; cv.height = 1024;
@@ -205,7 +167,7 @@ export function useThreeScene(containerRef, callbacks) {
         ctx.fillStyle = g; ctx.fillRect(0, 0, 2048, 1024);
       }
       const tex = new THREE.CanvasTexture(cv);
-      tex.mapping    = THREE.EquirectangularReflectionMapping;
+      tex.mapping = THREE.EquirectangularReflectionMapping;
       tex.colorSpace = THREE.SRGBColorSpace;
       return tex;
     }
@@ -220,22 +182,29 @@ export function useThreeScene(containerRef, callbacks) {
       }
     }
 
-    // Load real panoramas — pre-scaled to avoid GPU freeze
     loadPanoramaTexture('Assets/bg.png',       mobile, (t) => onPanoLoaded('dark',  t), () => onPanoLoaded('dark',  makeFallbackTexture(true)));
     loadPanoramaTexture('Assets/light bg.png', mobile, (t) => onPanoLoaded('light', t), () => onPanoLoaded('light', makeFallbackTexture(false)));
 
-    // Last-resort safety: if the real image never finishes loading in 8s
-    // (e.g. extremely slow connection) fire panoReady anyway so the intro
-    // doesn't stay stuck forever.
     const panoSafetyTimer = setTimeout(() => {
       if (!panoReadyFired) onPanoLoaded('dark', makeFallbackTexture(true));
     }, 8000);
 
     /* ── Islands ── */
-    const loader   = new GLTFLoader();
-    const islands  = [];
-    let loadedCount  = 0;
+    const loader      = new GLTFLoader();
+    const islands     = [];
+    let loadedCount   = 0;
     let allLoadedFired = false;
+
+    /*
+     * FIX: Track whether setIslandsVisible(true) has already been called.
+     * On mobile, some GLTFs can finish loading AFTER the intro completes and
+     * setIslandsVisible runs. Without this flag those late-arriving islands
+     * stay invisible forever because nothing ever makes them visible again.
+     *
+     * Now: every island that loads checks this flag and shows itself immediately
+     * if the intro has already finished.
+     */
+    let islandsVisible = false;
 
     function onIslandLoaded() {
       loadedCount++;
@@ -267,7 +236,8 @@ export function useThreeScene(containerRef, callbacks) {
       g.add(rock);
       g.position.set(def.x, def.y, def.z);
       g.userData = makeUD(def, index);
-      g.visible = false;
+      // If intro already done by the time placeholder is created, show it immediately
+      g.visible = islandsVisible;
       scene.add(g);
       islands.push(g);
     }
@@ -290,7 +260,10 @@ export function useThreeScene(containerRef, callbacks) {
             }
           });
           island.userData = makeUD(def, i);
-          island.visible  = false;
+          // KEY FIX: if intro already finished before this GLTF loaded,
+          // make it visible right away instead of waiting for a setIslandsVisible
+          // call that already happened (and will never happen again).
+          island.visible = islandsVisible;
           scene.add(island);
           islands.push(island);
           onIslandLoaded();
@@ -300,7 +273,7 @@ export function useThreeScene(containerRef, callbacks) {
       );
     });
 
-    // Last-resort: fire allIslandsLoaded even if a GLTF stalls on mobile network
+    // Safety: fire allIslandsLoaded even if a GLTF silently stalls
     const islandSafetyTimer = setTimeout(() => {
       if (!allLoadedFired) {
         allLoadedFired = true;
@@ -386,7 +359,6 @@ export function useThreeScene(containerRef, callbacks) {
     const onMouseUp   = (e) => {
       if (Math.hypot(e.clientX - mouseDownPos.x, e.clientY - mouseDownPos.y) > 5) return;
       if (viewMode === 'transitioning-in' || viewMode === 'transitioning-out') return;
-
       const clicked = pick(e.clientX, e.clientY);
       if (viewMode === 'overview' && clicked) {
         overviewCamPos.copy(camera.position);
@@ -408,7 +380,7 @@ export function useThreeScene(containerRef, callbacks) {
       if (!t) return;
       const dist = Math.hypot(t.clientX - touchStart.x, t.clientY - touchStart.y);
       const ms   = Date.now() - touchStart.ms;
-      if (dist > 12 || ms > 300) return;            // swipe or long-press → ignore
+      if (dist > 12 || ms > 300) return;
       onMouseUp({ clientX: t.clientX, clientY: t.clientY });
     };
 
@@ -502,6 +474,9 @@ export function useThreeScene(containerRef, callbacks) {
         });
       },
       setIslandsVisible(visible) {
+        // Set the flag so any island that loads AFTER this call
+        // will also become visible (fixes the mobile race condition).
+        islandsVisible = visible;
         islands.forEach((isl) => { isl.visible = visible; });
       },
       setIntroFinished(v) {
