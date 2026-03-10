@@ -43,34 +43,80 @@ function isMobileDevice() {
 /**
  * loadPanoramaTexture
  *
- * Loads the REAL panorama but pre-scales it inside a canvas to the GPU's
- * safe texture limit before creating the WebGL texture.
- * Prevents the "Texture has been resized" blocking freeze on mobile GPUs.
- * Desktop: max 4096px (no resize), Mobile: max 2048px.
+ * Loads the REAL panorama and produces a GPU-safe Three.js texture.
+ *
+ * DESKTOP: Uses THREE.TextureLoader directly — no resize needed, browser
+ *   handles the 4096px limit fine on desktop GPUs.
+ *
+ * MOBILE: Uses createImageBitmap() with built-in resizeWidth/resizeHeight.
+ *   This resizes the image OFF the main thread (browser-native worker),
+ *   so the Three.js render loop never freezes. Falls back to synchronous
+ *   canvas.drawImage() on older browsers that don't support resizing in
+ *   createImageBitmap (e.g. older iOS Safari < 15).
+ *
+ * onSuccess receives a ready-to-use THREE.Texture.
  */
 function loadPanoramaTexture(url, isMobile, onSuccess, onError) {
-  const MAX_PX = isMobile ? 2048 : 4096;
-  const img = new Image();
-  img.crossOrigin = 'anonymous';
-  img.onload = () => {
-    try {
-      const aspect = img.naturalWidth / img.naturalHeight;
-      let w = img.naturalWidth, h = img.naturalHeight;
-      if (w > MAX_PX || h > MAX_PX) {
-        if (w >= h) { w = MAX_PX; h = Math.round(MAX_PX / aspect); }
-        else        { h = MAX_PX; w = Math.round(MAX_PX * aspect); }
-      }
-      const cv = document.createElement('canvas');
-      cv.width = w; cv.height = h;
-      cv.getContext('2d').drawImage(img, 0, 0, w, h);
-      const tex = new THREE.CanvasTexture(cv);
+  if (!isMobile) {
+    // Desktop: original path, unchanged
+    const loader = new THREE.TextureLoader();
+    loader.load(
+      url,
+      (tex) => {
+        tex.mapping    = THREE.EquirectangularReflectionMapping;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        onSuccess(tex);
+      },
+      undefined,
+      onError
+    );
+    return;
+  }
+
+  // Mobile: fetch the image as a blob, then use createImageBitmap to resize
+  // off the main thread before building the CanvasTexture.
+  const MAX_PX = 2048;
+
+  fetch(url)
+    .then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.blob();
+    })
+    .then((blob) => {
+      // Try createImageBitmap with resize options (off-thread, non-blocking)
+      const bitmapOptions = {
+        resizeWidth:   MAX_PX,
+        resizeHeight:  MAX_PX / 2,   // equirectangular aspect ratio is always 2:1
+        resizeQuality: 'medium',
+      };
+
+      return createImageBitmap(blob, bitmapOptions).catch(() => {
+        // Older iOS / WebKit: createImageBitmap doesn't support resize options.
+        // Fall back to a regular createImageBitmap (no resize) and do the
+        // canvas.drawImage resize synchronously — at least we still avoid
+        // the triple-texture overhead of THREE.TextureLoader.
+        return createImageBitmap(blob).then((bmp) => {
+          const scale  = Math.min(1, MAX_PX / Math.max(bmp.width, bmp.height));
+          const w = Math.round(bmp.width  * scale);
+          const h = Math.round(bmp.height * scale);
+          const cv  = document.createElement('canvas');
+          cv.width  = w;
+          cv.height = h;
+          cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+          bmp.close();
+          return cv; // return canvas instead of bitmap so caller handles both
+        });
+      });
+    })
+    .then((source) => {
+      const tex = source instanceof ImageBitmap
+        ? new THREE.CanvasTexture(source)  // from resized bitmap (off-thread path)
+        : new THREE.CanvasTexture(source); // from fallback canvas (sync path)
       tex.mapping    = THREE.EquirectangularReflectionMapping;
       tex.colorSpace = THREE.SRGBColorSpace;
       onSuccess(tex);
-    } catch (e) { onError(e); }
-  };
-  img.onerror = onError;
-  img.src = url;
+    })
+    .catch(onError);
 }
 
 export function useThreeScene(containerRef, callbacks) {
@@ -94,7 +140,7 @@ export function useThreeScene(containerRef, callbacks) {
 
     /* ── Renderer ── */
     const renderer = new THREE.WebGLRenderer({
-      antialias: !mobile,             // antialias off on mobile saves significant GPU
+      antialias: !mobile,
       powerPreference: 'high-performance',
     });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, mobile ? 1.0 : 1.5));
@@ -110,7 +156,6 @@ export function useThreeScene(containerRef, callbacks) {
     scene.fog = new THREE.FogExp2(THEMES.dark.fog, THEMES.dark.fogDensity);
 
     /* ── Camera ── */
-    // Mobile: pull back & widen FOV so all islands fit on narrow screen
     const CAM_Y = mobile ? 180 : 160;
     const CAM_Z = mobile ? 280 : 220;
     const FOV   = mobile ? 65  : 55;
@@ -143,7 +188,6 @@ export function useThreeScene(containerRef, callbacks) {
     dirLight.shadow.camera.left   = -200;
     dirLight.shadow.camera.near   = 0.1;
     dirLight.shadow.camera.far    = 500;
-    // Halve shadow map resolution on mobile — halves shadow VRAM
     dirLight.shadow.mapSize.set(mobile ? 512 : 1024, mobile ? 512 : 1024);
     dirLight.shadow.bias = -0.001;
     scene.add(dirLight);
@@ -153,6 +197,7 @@ export function useThreeScene(containerRef, callbacks) {
     let panoReadyFired = false;
     let currentTheme   = 'dark';
 
+    // Fallback gradient — only used when real image fails to load
     function makeFallbackTexture(isDark) {
       const cv = document.createElement('canvas');
       cv.width = 2048; cv.height = 1024;
@@ -179,44 +224,50 @@ export function useThreeScene(containerRef, callbacks) {
 
     function onPanoLoaded(themeKey, tex) {
       panoramas[themeKey] = tex;
-      if (themeKey === currentTheme) scene.background = tex;
+      if (themeKey === currentTheme) {
+        scene.background = tex;
+      }
+
       if (themeKey === 'dark' && !panoReadyFired) {
         panoReadyFired = true;
         clearTimeout(panoSafetyTimer);
-        cbRef.current.onPanoReady?.();
+
+        // Wait one rendered frame so the panorama is visibly painted on the
+        // WebGL canvas before the intro overlay goes transparent.
+        // Without this the overlay flashes transparent for 1 frame showing
+        // a blank canvas before the GPU uploads the texture.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            cbRef.current.onPanoReady?.();
+          });
+        });
       }
     }
 
     loadPanoramaTexture('Assets/bg.png',       mobile, (t) => onPanoLoaded('dark',  t), () => onPanoLoaded('dark',  makeFallbackTexture(true)));
     loadPanoramaTexture('Assets/light bg.png', mobile, (t) => onPanoLoaded('light', t), () => onPanoLoaded('light', makeFallbackTexture(false)));
 
-    // Safety: if real pano never loads (no connection, 404, etc.) start the intro anyway
+    // Safety: if real pano never loads, use fallback so intro can proceed
     const panoSafetyTimer = setTimeout(() => {
       if (!panoReadyFired) onPanoLoaded('dark', makeFallbackTexture(true));
-    }, 8000);
+    }, 10000);
 
     /* ═══════════════════════════════════════════════════════════════
        ISLANDS
        ───────────────────────────────────────────────────────────────
-       The core mobile loading strategy:
+       DESKTOP: Original parallel GLTF loading — unchanged.
 
-       DESKTOP (unchanged): All 7 GLTFs fire simultaneously, same as
-       the original code. Fast on a desktop connection.
-
-       MOBILE: Two-phase approach that guarantees visible islands:
-         Phase 1 — SYNCHRONOUS: All 7 placeholder geometries are
-           built and added to the scene immediately (no async). When
-           setIslandsVisible(true) fires they are guaranteed to exist.
-         Phase 2 — SEQUENTIAL ASYNC: GLTFs are loaded one at a time
-           (next starts only after previous finishes). This prevents
-           the simultaneous 7-fetch memory/network overload that was
-           causing silent failures. When a GLTF loads it REPLACES its
-           placeholder in-place.
+       MOBILE: Two-phase approach:
+         Phase 1 (sync): All 7 placeholders built and added to islands[]
+           immediately. setIslandsVisible(true) is guaranteed to find them.
+         Phase 2 (sequential async): GLTFs load one at a time to avoid
+           simultaneous-fetch memory exhaustion. Each successful GLTF
+           swaps its placeholder out for the real model.
     ═══════════════════════════════════════════════════════════════ */
 
     const loader       = new GLTFLoader();
-    const islands      = [];      // scene objects, one per island def
-    let   islandsVisible = false; // tracks whether setIslandsVisible(true) has been called
+    const islands      = [];
+    let   islandsVisible = false;
     let   loadedCount    = 0;
     let   allLoadedFired = false;
 
@@ -232,7 +283,6 @@ export function useThreeScene(containerRef, callbacks) {
       };
     }
 
-    /* Build one placeholder Group for a given def */
     function buildPlaceholder(def, index, scale) {
       const g    = new THREE.Group();
       const rock = new THREE.Mesh(
@@ -242,14 +292,12 @@ export function useThreeScene(containerRef, callbacks) {
       rock.castShadow = rock.receiveShadow = true;
       g.add(rock);
 
-      // Small grass top
       const grass = new THREE.Mesh(
         new THREE.CylinderGeometry(28, 22, 10, 7),
         new THREE.MeshStandardMaterial({ color: 0x4a7c38, roughness: 0.8, flatShading: true })
       );
       grass.position.y = 28; grass.castShadow = grass.receiveShadow = true; g.add(grass);
 
-      // A few trees so it reads as an island at a glance
       const tc = def.isCenterIsland ? 5 : 3;
       const tr = def.isCenterIsland ? 16 : 12;
       for (let t = 0; t < tc; t++) {
@@ -273,7 +321,7 @@ export function useThreeScene(containerRef, callbacks) {
       g.position.set(def.x, def.y, def.z);
       g.scale.setScalar(scale / 3);
       g.userData = makeUD(def, index);
-      g.visible  = false; // hidden until intro finishes
+      g.visible  = false;
       return g;
     }
 
@@ -287,7 +335,7 @@ export function useThreeScene(containerRef, callbacks) {
     }
 
     if (!mobile) {
-      /* ── DESKTOP: original parallel loading ── */
+      /* ── DESKTOP: parallel loading, unchanged ── */
       ISLAND_DEFS.forEach((def, i) => {
         loader.load(
           def.file,
@@ -312,7 +360,6 @@ export function useThreeScene(containerRef, callbacks) {
           },
           undefined,
           () => {
-            // GLTF failed — use placeholder
             const ph = buildPlaceholder(def, i, def.scaleDesktop);
             scene.add(ph);
             islands.push(ph);
@@ -322,22 +369,16 @@ export function useThreeScene(containerRef, callbacks) {
       });
 
     } else {
-      /* ── MOBILE: two-phase loading ──────────────────────────────────
-         Phase 1: Place all 7 placeholders synchronously right now.
-                  They exist in `islands[]` immediately, so
-                  setIslandsVisible(true) will always find them.
-         Phase 2: Load GLTFs one at a time. When each finishes,
-                  SWAP the placeholder out for the real model.
-      ────────────────────────────────────────────────────────────── */
+      /* ── MOBILE: two-phase loading ── */
 
-      // Phase 1 — synchronous placeholder creation
+      // Phase 1: all placeholders synchronously — islands[] is populated NOW
       ISLAND_DEFS.forEach((def, i) => {
         const ph = buildPlaceholder(def, i, def.scaleMobile);
         scene.add(ph);
-        islands.push(ph); // index i in islands[] corresponds to def[i]
+        islands.push(ph);
       });
 
-      // Phase 2 — sequential GLTF loading (one at a time)
+      // Phase 2: sequential GLTF loading, one at a time
       let seqIndex = 0;
 
       function loadNext() {
@@ -348,7 +389,6 @@ export function useThreeScene(containerRef, callbacks) {
         loader.load(
           def.file,
           (gltf) => {
-            // Success: build the real island
             const island = gltf.scene;
             island.position.set(def.x, def.y, def.z);
             island.scale.setScalar(def.scaleMobile);
@@ -362,33 +402,29 @@ export function useThreeScene(containerRef, callbacks) {
               }
             });
             island.userData = makeUD(def, i);
-            // Match current visibility state
-            island.visible = islandsVisible;
+            island.visible  = islandsVisible;
 
-            // Swap: remove old placeholder, put real island in same slot
-            const oldPh = islands[i];
-            scene.remove(oldPh);
+            // Swap placeholder → real model
+            scene.remove(islands[i]);
             scene.add(island);
             islands[i] = island;
 
             onOneIslandLoaded();
-            loadNext(); // start next GLTF
+            loadNext();
           },
           undefined,
           () => {
-            // GLTF failed — placeholder stays, that's fine
-            // Update placeholder visibility to match current state
+            // GLTF failed — keep placeholder, update its visibility
             islands[i].visible = islandsVisible;
             onOneIslandLoaded();
-            loadNext(); // still continue to next island
+            loadNext();
           }
         );
       }
 
-      loadNext(); // kick off the sequential chain
+      loadNext();
     }
 
-    // Safety timer: fire allIslandsLoaded if sequential loading takes too long
     const islandSafetyTimer = setTimeout(() => {
       if (!allLoadedFired) {
         allLoadedFired = true;
@@ -589,8 +625,6 @@ export function useThreeScene(containerRef, callbacks) {
         });
       },
       setIslandsVisible(visible) {
-        // Store the flag so any island (placeholder or GLTF) that
-        // arrives later immediately matches the correct visibility state.
         islandsVisible = visible;
         islands.forEach((isl) => { isl.visible = visible; });
       },
