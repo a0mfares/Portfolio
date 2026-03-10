@@ -32,6 +32,57 @@ const ISLAND_DEFS = [
   { x: Math.cos(d(300)) * ORBIT_R, y: 25, z: Math.sin(d(300)) * ORBIT_R, scale: 44, file: 'Assets/floating Island 6.glb' },
 ];
 
+/* ── Mobile detection ── */
+function detectMobile() {
+  return (
+    /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+    (typeof window !== 'undefined' && window.innerWidth <= 768)
+  );
+}
+
+/**
+ * loadTextureWithFallback
+ *
+ * On mobile: loads the image via <img>, downscales it on a canvas to maxSize,
+ * then creates a CanvasTexture — avoiding the GPU-side resize that causes
+ * the "Texture has been resized" warning and mobile freezes.
+ *
+ * On desktop: uses the standard THREE.TextureLoader for best quality.
+ */
+function loadTextureWithFallback(url, isMobile, onSuccess, onError) {
+  const maxMobileSize = 2048; // safe for all mobile GPUs
+
+  if (isMobile) {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxMobileSize / Math.max(img.naturalWidth, img.naturalHeight));
+        const w = Math.floor(img.naturalWidth  * scale);
+        const h = Math.floor(img.naturalHeight * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width  = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.mapping    = THREE.EquirectangularReflectionMapping;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        onSuccess(tex);
+      } catch (e) {
+        onError(e);
+      }
+    };
+
+    img.onerror = onError;
+    img.src = url;
+  } else {
+    const loader = new THREE.TextureLoader();
+    loader.load(url, onSuccess, undefined, onError);
+  }
+}
+
 /**
  * useThreeScene
  *
@@ -45,14 +96,11 @@ const ISLAND_DEFS = [
  *   onReturn()             — startReturn triggered (close panels immediately)
  */
 export function useThreeScene(containerRef, callbacks) {
-  /* Keep callbacks in a ref so the animation loop always reads the latest version */
   const cbRef = useRef(callbacks);
   cbRef.current = callbacks;
 
-  /* Flags the hook consumer can mutate without re-renders */
   const introFinishedRef = useRef(false);
 
-  /* Exposed imperative API */
   const apiRef = useRef({
     applyTheme: () => {},
     setIslandsVisible: () => {},
@@ -64,13 +112,18 @@ export function useThreeScene(containerRef, callbacks) {
     const container = containerRef.current;
     if (!container) return;
 
+    const isMobile = detectMobile();
+
     /* ── Renderer ── */
-    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    const renderer = new THREE.WebGLRenderer({
+      antialias: !isMobile,             // antialias off on mobile for perf
+      powerPreference: 'high-performance',
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobile ? 1.0 : 1.5));
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = THEMES.dark.exposure;
-    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.enabled = !isMobile;   // shadows off on mobile
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
 
@@ -90,6 +143,11 @@ export function useThreeScene(containerRef, callbacks) {
     controls.maxPolarAngle = Math.PI / 2 - 0.05;
     controls.minDistance = 20;
     controls.maxDistance = 600;
+    // Better touch feel on mobile
+    controls.touches = {
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN,
+    };
 
     /* ── Lights ── */
     const ambientLight = new THREE.AmbientLight(THEMES.dark.ambientColor, THEMES.dark.ambientIntensity);
@@ -97,20 +155,22 @@ export function useThreeScene(containerRef, callbacks) {
 
     const dirLight = new THREE.DirectionalLight(THEMES.dark.dirColor, THEMES.dark.dirIntensity);
     dirLight.position.set(50, 100, 50);
-    dirLight.castShadow = true;
-    dirLight.shadow.camera.top    =  200;
-    dirLight.shadow.camera.right  =  200;
-    dirLight.shadow.camera.bottom = -200;
-    dirLight.shadow.camera.left   = -200;
-    dirLight.shadow.camera.near = 0.1;
-    dirLight.shadow.camera.far  = 500;
-    dirLight.shadow.mapSize.set(1024, 1024);
-    dirLight.shadow.bias = -0.001;
+    if (!isMobile) {
+      dirLight.castShadow = true;
+      dirLight.shadow.camera.top    =  200;
+      dirLight.shadow.camera.right  =  200;
+      dirLight.shadow.camera.bottom = -200;
+      dirLight.shadow.camera.left   = -200;
+      dirLight.shadow.camera.near = 0.1;
+      dirLight.shadow.camera.far  = 500;
+      dirLight.shadow.mapSize.set(1024, 1024);
+      dirLight.shadow.bias = -0.001;
+    }
     scene.add(dirLight);
 
     /* ── Panoramic Backgrounds ── */
     const panoramas = { dark: null, light: null };
-    const texLoader = new THREE.TextureLoader();
+    let panoReadyFired = false;
     let currentTheme = 'dark';
 
     function makeFallbackTexture(isDark) {
@@ -132,36 +192,63 @@ export function useThreeScene(containerRef, callbacks) {
         ctx.fillStyle = g; ctx.fillRect(0, 0, 2048, 1024);
       }
       const tex = new THREE.CanvasTexture(cv);
-      tex.mapping = THREE.EquirectangularReflectionMapping;
+      tex.mapping    = THREE.EquirectangularReflectionMapping;
       tex.colorSpace = THREE.SRGBColorSpace;
       return tex;
     }
 
     function processPanorama(themeKey, tex) {
-      tex.mapping = THREE.EquirectangularReflectionMapping;
-      tex.colorSpace = THREE.SRGBColorSpace;
+      // Only set mapping/colorSpace if not already a CanvasTexture (those are pre-set)
+      if (!(tex instanceof THREE.CanvasTexture)) {
+        tex.mapping    = THREE.EquirectangularReflectionMapping;
+        tex.colorSpace = THREE.SRGBColorSpace;
+      }
       panoramas[themeKey] = tex;
       if (themeKey === currentTheme) scene.background = tex;
-      if (themeKey === 'dark') cbRef.current.onPanoReady?.();
+      if (themeKey === 'dark' && !panoReadyFired) {
+        panoReadyFired = true;
+        cbRef.current.onPanoReady?.();
+      }
     }
 
     function loadPanorama(themeKey, url) {
-      texLoader.load(
+      loadTextureWithFallback(
         url,
+        isMobile,
         (tex) => processPanorama(themeKey, tex),
-        undefined,
-        () => processPanorama(themeKey, makeFallbackTexture(themeKey === 'dark'))
+        ()    => processPanorama(themeKey, makeFallbackTexture(themeKey === 'dark'))
       );
     }
 
-    loadPanorama('dark', 'Assets/bg.png');
+    loadPanorama('dark',  'Assets/bg.png');
     loadPanorama('light', 'Assets/light bg.png');
+
+    // ── Safety timeout: if dark pano never loads in 6s, use fallback ──
+    // Covers slow mobile connections and silent load failures
+    const panoSafetyTimer = setTimeout(() => {
+      if (!panoReadyFired) {
+        processPanorama('dark', makeFallbackTexture(true));
+      }
+      if (!panoramas.light) {
+        processPanorama('light', makeFallbackTexture(false));
+      }
+    }, 6000);
 
     /* ── Islands ── */
     const loader = new GLTFLoader();
     const islands = [];
     let loadedCount = 0;
     const totalIslands = ISLAND_DEFS.length;
+    let allIslandsLoadedFired = false;
+
+    function onIslandLoaded() {
+      loadedCount++;
+      if (loadedCount >= totalIslands && !allIslandsLoadedFired) {
+        allIslandsLoadedFired = true;
+        clearTimeout(islandsSafetyTimer);
+        cbRef.current.onAllIslandsLoaded?.();
+      }
+    }
 
     function makeUD(def, index) {
       return {
@@ -178,51 +265,15 @@ export function useThreeScene(containerRef, callbacks) {
     function makePlaceholder(def, index) {
       const g = new THREE.Group();
       const rock = new THREE.Mesh(
-        new THREE.DodecahedronGeometry(def.isCenterIsland ? 38 : 30, 1),
-        new THREE.MeshStandardMaterial({ color: 0x7a6a55, roughness: 0.9, flatShading: true })
+        new THREE.DodecahedronGeometry(def.isCenterIsland ? 30 : 20, 1),
+        new THREE.MeshStandardMaterial({ color: 0x445566, roughness: 0.9 })
       );
-      rock.castShadow = rock.receiveShadow = true;
       g.add(rock);
-
-      const grass = new THREE.Mesh(
-        new THREE.CylinderGeometry(28, 22, 10, 7),
-        new THREE.MeshStandardMaterial({ color: 0x4a7c38, roughness: 0.8, flatShading: true })
-      );
-      grass.position.y = 28; grass.castShadow = grass.receiveShadow = true; g.add(grass);
-
-      const tc = def.isCenterIsland ? 5 : 3;
-      const tr = def.isCenterIsland ? 16 : 12;
-      for (let t = 0; t < tc; t++) {
-        const tg = new THREE.Group();
-        const trunk = new THREE.Mesh(
-          new THREE.CylinderGeometry(1.5, 2.4, 12, 5),
-          new THREE.MeshStandardMaterial({ color: 0x4a3728 })
-        );
-        trunk.position.y = 6; tg.add(trunk);
-        const leaves = new THREE.Mesh(
-          new THREE.ConeGeometry(9, 18, 5),
-          new THREE.MeshStandardMaterial({ color: 0x2d5a27, flatShading: true })
-        );
-        leaves.position.y = 18; tg.add(leaves);
-        const a = (t / tc) * Math.PI * 2;
-        tg.position.set(Math.cos(a) * tr, 30, Math.sin(a) * tr);
-        tg.rotation.y = Math.random() * Math.PI;
-        g.add(tg);
-      }
-
       g.position.set(def.x, def.y, def.z);
-      g.scale.setScalar(def.scale / 3);
       g.userData = makeUD(def, index);
       g.visible = false;
       scene.add(g);
       islands.push(g);
-    }
-
-    function onIslandLoaded() {
-      loadedCount++;
-      if (loadedCount === totalIslands) {
-        cbRef.current.onAllIslandsLoaded?.();
-      }
     }
 
     ISLAND_DEFS.forEach((def, i) => {
@@ -234,7 +285,7 @@ export function useThreeScene(containerRef, callbacks) {
           island.scale.setScalar(def.scale);
           island.traverse((child) => {
             if (child.isMesh) {
-              child.castShadow = child.receiveShadow = true;
+              if (!isMobile) child.castShadow = child.receiveShadow = true;
               if (child.material) {
                 child.material.envMapIntensity = THEMES[currentTheme].envMapIntensity;
                 child.material.roughness = Math.max(child.material.roughness ?? 0.5, 0.2);
@@ -252,8 +303,16 @@ export function useThreeScene(containerRef, callbacks) {
       );
     });
 
+    // ── Safety timeout: fire allIslandsLoaded even if some GLTFs stall ──
+    // Mobile networks / GPU memory limits can cause silent load failures
+    const islandsSafetyTimer = setTimeout(() => {
+      if (!allIslandsLoadedFired) {
+        allIslandsLoadedFired = true;
+        cbRef.current.onAllIslandsLoaded?.();
+      }
+    }, isMobile ? 15000 : 25000);
+
     /* ── Camera Transitions ── */
-    // Build focus defs here to keep three.js module-scoped
     const ISLAND_FOCUS_DEFS = {
       0: { pos: new THREE.Vector3(0, 80, 90),                                              target: new THREE.Vector3(0, 38, 0) },
       1: { pos: new THREE.Vector3(Math.cos(d(0))   * 55, 70, Math.sin(d(0))   * 55),      target: new THREE.Vector3(Math.cos(d(0))   * ORBIT_R, 28, Math.sin(d(0))   * ORBIT_R) },
@@ -306,6 +365,8 @@ export function useThreeScene(containerRef, callbacks) {
       viewMode = 'transitioning-out'; controls.enabled = false;
       focusedIsland = null;
       cbRef.current.onReturn?.();
+      bzP0 = bzP1 = bzP2 = bzP3 = null;
+      lookFrom = lookTo = null;
     }
 
     /* ── Raycasting / Click ── */
@@ -344,12 +405,23 @@ export function useThreeScene(containerRef, callbacks) {
       }
     };
 
-    let touchStart = { x: 0, y: 0 };
-    const onTouchStart = (e) => { touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; };
+    let touchStart = { x: 0, y: 0, time: 0 };
+    const onTouchStart = (e) => {
+      if (e.touches.length === 1) {
+        touchStart = {
+          x: e.touches[0].clientX,
+          y: e.touches[0].clientY,
+          time: Date.now(),
+        };
+      }
+    };
     const onTouchEnd = (e) => {
       const t = e.changedTouches[0];
       if (!t) return;
-      if (Math.hypot(t.clientX - touchStart.x, t.clientY - touchStart.y) > 10) return;
+      const dist = Math.hypot(t.clientX - touchStart.x, t.clientY - touchStart.y);
+      const elapsed = Date.now() - touchStart.time;
+      // Only treat as tap if finger barely moved and was quick (< 300ms)
+      if (dist > 12 || elapsed > 300) return;
       onMouseUp({ clientX: t.clientX, clientY: t.clientY });
     };
 
@@ -453,6 +525,8 @@ export function useThreeScene(containerRef, callbacks) {
 
     /* ── Cleanup ── */
     return () => {
+      clearTimeout(panoSafetyTimer);
+      clearTimeout(islandsSafetyTimer);
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', onResize);
       renderer.domElement.removeEventListener('mousedown', onMouseDown);
@@ -464,7 +538,6 @@ export function useThreeScene(containerRef, callbacks) {
       if (container.contains(renderer.domElement)) {
         container.removeChild(renderer.domElement);
       }
-      // Reset API
       apiRef.current = {
         applyTheme: () => {},
         setIslandsVisible: () => {},

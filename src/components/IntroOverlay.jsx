@@ -10,6 +10,9 @@ const DELETE_INTERVAL = 22; // ms per deleted character
  *  waiting-pano → typing (when panoReady)
  *  typing       → deleting (when typing done AND allLoaded)
  *  deleting     → done (when text empty → calls onComplete)
+ *
+ * Mobile-safe: internal timeouts ensure the overlay never hangs
+ * even if panoReady or allIslandsLoaded signals are delayed/missed.
  */
 function IntroOverlay({ panoReady, allIslandsLoaded, onComplete }) {
   const [phase, setPhase] = useState('waiting-pano'); // waiting-pano | typing | deleting | done
@@ -22,10 +25,40 @@ function IntroOverlay({ panoReady, allIslandsLoaded, onComplete }) {
   const charIndexRef      = useRef(0);
   const loadStartRef      = useRef(performance.now());
   const loadedFractionRef = useRef(0);
+  const phaseRef          = useRef('waiting-pano');
 
-  /* Track allIslandsLoaded count for adaptive speed */
-  const totalIslands = 7;
-  const loadedCountRef = useRef(0);
+  // Keep phaseRef in sync so timeouts can read the latest phase
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+
+  /* ── Hard fallback: if panoReady never fires in 8s, start typing anyway ──
+     Covers cases where bg.png load silently fails on mobile            */
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (phaseRef.current === 'waiting-pano') {
+        setShowSpinner(false);
+        setTimeout(() => {
+          if (phaseRef.current === 'waiting-pano') {
+            setPhase('typing');
+            setShowText(true);
+          }
+        }, 500);
+      }
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ── Hard fallback: if allIslandsLoaded never fires in 18s, force delete ──
+     Covers cases where GLTF loading stalls on slow/mobile connections   */
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (!allLoadedReadyRef.current) {
+        allLoadedReadyRef.current = true;
+        loadedFractionRef.current = 1;
+        checkReadyToDelete();
+      }
+    }, 18000);
+    return () => clearTimeout(timer);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* When panoReady fires, fade spinner and start typing */
   useEffect(() => {
@@ -33,8 +66,13 @@ function IntroOverlay({ panoReady, allIslandsLoaded, onComplete }) {
 
     setShowSpinner(false);
     const timer = setTimeout(() => {
-      setPhase('typing');
-      setShowText(true);
+      setPhase((prev) => {
+        if (prev === 'waiting-pano') {
+          setShowText(true);
+          return 'typing';
+        }
+        return prev;
+      });
     }, 500);
     return () => clearTimeout(timer);
   }, [panoReady]);
@@ -53,8 +91,8 @@ function IntroOverlay({ panoReady, allIslandsLoaded, onComplete }) {
         return;
       }
 
-      const elapsed  = performance.now() - loadStartRef.current;
-      const fraction = loadedFractionRef.current;
+      const elapsed   = performance.now() - loadStartRef.current;
+      const fraction  = loadedFractionRef.current;
       const charsLeft = INTRO_TEXT.length - i;
       const remainingLoad = fraction > 0 ? elapsed * (1 - fraction) / fraction : 600;
       const delay = Math.min(500, Math.max(28, remainingLoad / charsLeft));
