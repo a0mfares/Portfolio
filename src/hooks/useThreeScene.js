@@ -23,13 +23,13 @@ const ORBIT_R = 120;
 const d = THREE.MathUtils.degToRad;
 
 const ISLAND_DEFS = [
-  { x: 0,                          y: 30, z: 0,                          scaleDesktop: 58, scaleMobile: 50, file: 'Assets/middle.glb', isCenterIsland: true },
+  { x: 0,                          y: 30, z: 0,                          scaleDesktop: 58, scaleMobile: 50, file: 'Assets/middle.glb',              isCenterIsland: true },
   { x: Math.cos(d(0))   * ORBIT_R, y: 20, z: Math.sin(d(0))   * ORBIT_R, scaleDesktop: 45, scaleMobile: 38, file: 'Assets/Floadting Island 1.glb' },
-  { x: Math.cos(d(60))  * ORBIT_R, y: 25, z: Math.sin(d(60))  * ORBIT_R, scaleDesktop: 48, scaleMobile: 40, file: 'Assets/floating Island 3.glb' },
-  { x: Math.cos(d(120)) * ORBIT_R, y: 35, z: Math.sin(d(120)) * ORBIT_R, scaleDesktop: 52, scaleMobile: 44, file: 'Assets/floating island 2.glb' },
-  { x: Math.cos(d(180)) * ORBIT_R, y: 22, z: Math.sin(d(180)) * ORBIT_R, scaleDesktop: 42, scaleMobile: 35, file: 'Assets/floating Island 4.glb' },
-  { x: Math.cos(d(240)) * ORBIT_R, y: 28, z: Math.sin(d(240)) * ORBIT_R, scaleDesktop: 46, scaleMobile: 39, file: 'Assets/floating Island 5.glb' },
-  { x: Math.cos(d(300)) * ORBIT_R, y: 25, z: Math.sin(d(300)) * ORBIT_R, scaleDesktop: 44, scaleMobile: 37, file: 'Assets/floating Island 6.glb' },
+  { x: Math.cos(d(60))  * ORBIT_R, y: 25, z: Math.sin(d(60))  * ORBIT_R, scaleDesktop: 48, scaleMobile: 40, file: 'Assets/floating Island 3.glb'   },
+  { x: Math.cos(d(120)) * ORBIT_R, y: 35, z: Math.sin(d(120)) * ORBIT_R, scaleDesktop: 52, scaleMobile: 44, file: 'Assets/floating island 2.glb'   },
+  { x: Math.cos(d(180)) * ORBIT_R, y: 22, z: Math.sin(d(180)) * ORBIT_R, scaleDesktop: 42, scaleMobile: 35, file: 'Assets/floating Island 4.glb'   },
+  { x: Math.cos(d(240)) * ORBIT_R, y: 28, z: Math.sin(d(240)) * ORBIT_R, scaleDesktop: 46, scaleMobile: 39, file: 'Assets/floating Island 5.glb'   },
+  { x: Math.cos(d(300)) * ORBIT_R, y: 25, z: Math.sin(d(300)) * ORBIT_R, scaleDesktop: 44, scaleMobile: 37, file: 'Assets/floating Island 6.glb'   },
 ];
 
 function isMobileDevice() {
@@ -41,9 +41,8 @@ function isMobileDevice() {
 
 /**
  * loadPanoramaTexture
- * Loads the real panorama but pre-scales it inside a canvas to the GPU's
- * safe texture size limit before creating the Three.js texture.
- * This avoids the "Texture has been resized" freeze on mobile GPUs.
+ * Loads the real panorama pre-scaled to GPU-safe size via canvas,
+ * preventing the "Texture has been resized" freeze on mobile GPUs.
  */
 function loadPanoramaTexture(url, isMobile, onSuccess, onError) {
   const MAX_PX = isMobile ? 2048 : 4096;
@@ -52,17 +51,15 @@ function loadPanoramaTexture(url, isMobile, onSuccess, onError) {
   img.onload = () => {
     try {
       const aspect = img.naturalWidth / img.naturalHeight;
-      let w = img.naturalWidth;
-      let h = img.naturalHeight;
+      let w = img.naturalWidth, h = img.naturalHeight;
       if (w > MAX_PX || h > MAX_PX) {
         if (w >= h) { w = MAX_PX; h = Math.round(MAX_PX / aspect); }
         else        { h = MAX_PX; w = Math.round(MAX_PX * aspect); }
       }
-      const canvas = document.createElement('canvas');
-      canvas.width  = w;
-      canvas.height = h;
-      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-      const tex = new THREE.CanvasTexture(canvas);
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(img, 0, 0, w, h);
+      const tex = new THREE.CanvasTexture(cv);
       tex.mapping    = THREE.EquirectangularReflectionMapping;
       tex.colorSpace = THREE.SRGBColorSpace;
       onSuccess(tex);
@@ -190,18 +187,18 @@ export function useThreeScene(containerRef, callbacks) {
     }, 8000);
 
     /* ── Islands ── */
-    const loader      = new GLTFLoader();
-    const islands     = [];
-    let loadedCount   = 0;
+    const loader       = new GLTFLoader();
+    const islands      = [];
+    let loadedCount    = 0;
     let allLoadedFired = false;
 
     /*
-     * FIX: Track whether setIslandsVisible(true) has already been called.
-     * On mobile, some GLTFs can finish loading AFTER the intro completes and
-     * setIslandsVisible runs. Without this flag those late-arriving islands
-     * stay invisible forever because nothing ever makes them visible again.
+     * islandsVisible flag — tracks whether setIslandsVisible(true) has been called.
      *
-     * Now: every island that loads checks this flag and shows itself immediately
+     * On mobile some GLTFs finish loading AFTER the intro completes and
+     * setIslandsVisible(true) has already run. Without this flag those
+     * late-arriving islands stay stuck at visible=false forever.
+     * Fix: every island checks this flag on arrival and shows itself immediately
      * if the intro has already finished.
      */
     let islandsVisible = false;
@@ -228,15 +225,19 @@ export function useThreeScene(containerRef, callbacks) {
     }
 
     function makePlaceholder(def, index) {
-      const g    = new THREE.Group();
+      // BUG FIX: was using def.scale (undefined) — must use scaleDesktop/scaleMobile
+      const scale = mobile ? def.scaleMobile : def.scaleDesktop;
+
+      const g = new THREE.Group();
       const rock = new THREE.Mesh(
         new THREE.DodecahedronGeometry(def.isCenterIsland ? 30 : 20, 1),
         new THREE.MeshStandardMaterial({ color: 0x445566, roughness: 0.9 })
       );
       g.add(rock);
       g.position.set(def.x, def.y, def.z);
+      g.scale.setScalar(scale / 3);
       g.userData = makeUD(def, index);
-      // If intro already done by the time placeholder is created, show it immediately
+      // Show immediately if intro has already finished
       g.visible = islandsVisible;
       scene.add(g);
       islands.push(g);
@@ -260,9 +261,7 @@ export function useThreeScene(containerRef, callbacks) {
             }
           });
           island.userData = makeUD(def, i);
-          // KEY FIX: if intro already finished before this GLTF loaded,
-          // make it visible right away instead of waiting for a setIslandsVisible
-          // call that already happened (and will never happen again).
+          // Show immediately if intro has already finished
           island.visible = islandsVisible;
           scene.add(island);
           islands.push(island);
@@ -273,7 +272,7 @@ export function useThreeScene(containerRef, callbacks) {
       );
     });
 
-    // Safety: fire allIslandsLoaded even if a GLTF silently stalls
+    // Safety: fire allIslandsLoaded even if a GLTF silently stalls on mobile
     const islandSafetyTimer = setTimeout(() => {
       if (!allLoadedFired) {
         allLoadedFired = true;
@@ -474,8 +473,7 @@ export function useThreeScene(containerRef, callbacks) {
         });
       },
       setIslandsVisible(visible) {
-        // Set the flag so any island that loads AFTER this call
-        // will also become visible (fixes the mobile race condition).
+        // Also set the flag so islands arriving late (after this call) show up too
         islandsVisible = visible;
         islands.forEach((isl) => { isl.visible = visible; });
       },

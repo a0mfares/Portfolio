@@ -1,38 +1,36 @@
 import { useState, useEffect, useRef } from 'react';
 
-const INTRO_TEXT = "Hello, I am Ahmed Mohamed Ahmed\nand this is my Portfolio";
-const DELETE_INTERVAL = 22; // ms per deleted character
+const INTRO_TEXT      = "Hello, I am Ahmed Mohamed Ahmed\nand this is my Portfolio";
+const DELETE_INTERVAL = 18;   // ms per deleted character (faster backspace)
+const POST_TYPE_WAIT  = 4000; // ms to show the full sentence before deleting
 
 /**
  * IntroOverlay
  *
- * Phase machine — identical to desktop:
- *  waiting-pano → typing (when panoReady)
- *  typing       → deleting (when typing done AND allLoaded)
- *  deleting     → done (calls onComplete)
- *
- * Mobile-safe additions:
- *  • If panoReady never arrives in 8s → force-start typing anyway
- *  • If allIslandsLoaded never arrives in 18s → force-start deleting anyway
- *  These are last-resort fallbacks only; the normal path always takes priority.
+ * Phase machine:
+ *  waiting-pano → typing  (when panoReady fires)
+ *  typing       → deleting (when typing finishes — starts a 4s countdown,
+ *                           begins deleting when either allIslandsLoaded
+ *                           fires OR the 4s countdown expires, whichever first)
+ *  deleting     → done    (calls onComplete when text is empty)
  */
 function IntroOverlay({ panoReady, allIslandsLoaded, onComplete }) {
-  const [phase, setPhase]           = useState('waiting-pano');
+  const [phase, setPhase]                 = useState('waiting-pano');
   const [displayedText, setDisplayedText] = useState('');
   const [showSpinner, setShowSpinner]     = useState(true);
   const [showText, setShowText]           = useState(false);
 
   const typingDoneRef     = useRef(false);
   const allLoadedReadyRef = useRef(false);
+  const deleteScheduledRef = useRef(false); // guard: only schedule delete once
   const charIndexRef      = useRef(0);
   const loadStartRef      = useRef(performance.now());
   const loadedFractionRef = useRef(0);
   const phaseRef          = useRef('waiting-pano');
 
-  // Keep phaseRef current so setTimeout callbacks can read it without stale closure
   useEffect(() => { phaseRef.current = phase; }, [phase]);
 
-  /* ── Last-resort: start typing if panoReady never fires in 8s ── */
+  /* ── Hard fallback: start typing after 8s even if panoReady never fires ── */
   useEffect(() => {
     const id = setTimeout(() => {
       if (phaseRef.current === 'waiting-pano') {
@@ -48,28 +46,13 @@ function IntroOverlay({ panoReady, allIslandsLoaded, onComplete }) {
     return () => clearTimeout(id);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── Last-resort: finish overlay if allIslandsLoaded never fires in 18s ── */
-  useEffect(() => {
-    const id = setTimeout(() => {
-      if (!allLoadedReadyRef.current) {
-        allLoadedReadyRef.current = true;
-        loadedFractionRef.current = 1;
-        checkReadyToDelete();
-      }
-    }, 18000);
-    return () => clearTimeout(id);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /* ── Normal path: panoReady fires → fade spinner, start typing ── */
+  /* ── Normal path: panoReady fires ── */
   useEffect(() => {
     if (!panoReady) return;
     setShowSpinner(false);
     const id = setTimeout(() => {
       setPhase((prev) => {
-        if (prev === 'waiting-pano') {
-          setShowText(true);
-          return 'typing';
-        }
+        if (prev === 'waiting-pano') { setShowText(true); return 'typing'; }
         return prev;
       });
     }, 500);
@@ -86,7 +69,7 @@ function IntroOverlay({ panoReady, allIslandsLoaded, onComplete }) {
       const i = charIndexRef.current;
       if (i >= INTRO_TEXT.length) {
         typingDoneRef.current = true;
-        checkReadyToDelete();
+        tryScheduleDelete();
         return;
       }
       const elapsed   = performance.now() - loadStartRef.current;
@@ -107,9 +90,27 @@ function IntroOverlay({ panoReady, allIslandsLoaded, onComplete }) {
     return () => { active = false; };
   }, [phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  function checkReadyToDelete() {
-    if (!typingDoneRef.current || !allLoadedReadyRef.current) return;
-    setTimeout(() => setPhase('deleting'), 900);
+  /*
+   * tryScheduleDelete
+   *
+   * Called when typing completes OR when allIslandsLoaded fires.
+   * Starts a POST_TYPE_WAIT (4s) countdown the first time typing finishes.
+   * Deletion begins when either:
+   *   a) allIslandsLoaded fires (immediately after the 4s wait)
+   *   b) the 4s countdown expires (even if islands aren't fully loaded yet)
+   */
+  const deleteTimerRef = useRef(null);
+
+  function tryScheduleDelete() {
+    if (!typingDoneRef.current) return;   // typing not done yet
+    if (deleteScheduledRef.current) return; // already scheduled
+
+    // If islands already loaded, wait 4s then delete
+    // If islands not yet loaded, also wait 4s then delete regardless
+    deleteScheduledRef.current = true;
+    deleteTimerRef.current = setTimeout(() => {
+      setPhase('deleting');
+    }, POST_TYPE_WAIT);
   }
 
   /* ── allIslandsLoaded signal ── */
@@ -117,8 +118,13 @@ function IntroOverlay({ panoReady, allIslandsLoaded, onComplete }) {
     if (!allIslandsLoaded) return;
     loadedFractionRef.current  = 1;
     allLoadedReadyRef.current  = true;
-    checkReadyToDelete();
+    tryScheduleDelete();
   }, [allIslandsLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* Cleanup the delete timer on unmount */
+  useEffect(() => {
+    return () => { if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current); };
+  }, []);
 
   /* ── Deleting phase ── */
   useEffect(() => {
