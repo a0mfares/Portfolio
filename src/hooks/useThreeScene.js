@@ -23,14 +23,55 @@ const ORBIT_R = 120;
 const d = THREE.MathUtils.degToRad;
 
 const ISLAND_DEFS = [
-  { x: 0,                          y: 30, z: 0,                          scale: 58, file: 'Assets/middle.glb',              isCenterIsland: true },
+  { x: 0, y: 30, z: 0, scale: 58, file: 'Assets/middle.glb', isCenterIsland: true },
   { x: Math.cos(d(0))   * ORBIT_R, y: 20, z: Math.sin(d(0))   * ORBIT_R, scale: 45, file: 'Assets/Floadting Island 1.glb' },
-  { x: Math.cos(d(60))  * ORBIT_R, y: 25, z: Math.sin(d(60))  * ORBIT_R, scale: 48, file: 'Assets/floating Island 3.glb'  },
-  { x: Math.cos(d(120)) * ORBIT_R, y: 35, z: Math.sin(d(120)) * ORBIT_R, scale: 52, file: 'Assets/floating island 2.glb'  },
-  { x: Math.cos(d(180)) * ORBIT_R, y: 22, z: Math.sin(d(180)) * ORBIT_R, scale: 42, file: 'Assets/floating Island 4.glb'  },
-  { x: Math.cos(d(240)) * ORBIT_R, y: 28, z: Math.sin(d(240)) * ORBIT_R, scale: 46, file: 'Assets/floating Island 5.glb'  },
-  { x: Math.cos(d(300)) * ORBIT_R, y: 25, z: Math.sin(d(300)) * ORBIT_R, scale: 44, file: 'Assets/floating Island 6.glb'  },
+  { x: Math.cos(d(60))  * ORBIT_R, y: 25, z: Math.sin(d(60))  * ORBIT_R, scale: 48, file: 'Assets/floating Island 3.glb' },
+  { x: Math.cos(d(120)) * ORBIT_R, y: 35, z: Math.sin(d(120)) * ORBIT_R, scale: 52, file: 'Assets/floating island 2.glb' },
+  { x: Math.cos(d(180)) * ORBIT_R, y: 22, z: Math.sin(d(180)) * ORBIT_R, scale: 42, file: 'Assets/floating Island 4.glb' },
+  { x: Math.cos(d(240)) * ORBIT_R, y: 28, z: Math.sin(d(240)) * ORBIT_R, scale: 46, file: 'Assets/floating Island 5.glb' },
+  { x: Math.cos(d(300)) * ORBIT_R, y: 25, z: Math.sin(d(300)) * ORBIT_R, scale: 44, file: 'Assets/floating Island 6.glb' },
 ];
+
+/* ─────────────────────────────────────────────────────────────────
+   Mobile / DPR Helpers
+   
+   Problem: Android Chrome reports a high devicePixelRatio (e.g. 3×)
+   but silently clips the WebGL framebuffer at 4096px on either axis.
+   The result is objects rendering incorrectly or appearing black/
+   corrupted when (innerWidth × dpr) or (innerHeight × dpr) > 4096.
+   
+   Fix (from Three.js community thread):
+     Clamp dpr so neither canvas dimension exceeds MAX_ANDROID_BUFFER.
+     We also re-run this calculation on every resize because
+     orientation changes swap width/height and can re-trigger the bug.
+───────────────────────────────────────────────────────────────── */
+const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+const isAndroidChrome =
+  /Android/i.test(navigator.userAgent) && /Chrome/i.test(navigator.userAgent);
+const MAX_ANDROID_BUFFER = 4096;
+
+function getSafeDPR() {
+  // Start with the native ratio, already capped lower on mobile for perf
+  let dpr = Math.min(window.devicePixelRatio, isMobile ? 1.5 : 2);
+
+  // Apply the Android/Chrome 4096-buffer-dimension fix
+  if (
+    isAndroidChrome &&
+    (window.innerWidth * dpr > MAX_ANDROID_BUFFER ||
+      window.innerHeight * dpr > MAX_ANDROID_BUFFER)
+  ) {
+    dpr = Math.floor(
+      Math.min(
+        dpr - 1,
+        MAX_ANDROID_BUFFER / window.innerHeight,
+        MAX_ANDROID_BUFFER / window.innerWidth,
+      ),
+    );
+  }
+
+  // Safety floor — never let dpr drop below 0.5
+  return Math.max(dpr, 0.5);
+}
 
 /**
  * useThreeScene
@@ -45,68 +86,64 @@ const ISLAND_DEFS = [
  *   onReturn()             — startReturn triggered (close panels immediately)
  */
 export function useThreeScene(containerRef, callbacks) {
+  /* Keep callbacks in a ref so the animation loop always reads the latest version */
   const cbRef = useRef(callbacks);
   cbRef.current = callbacks;
 
+  /* Flags the hook consumer can mutate without re-renders */
   const introFinishedRef = useRef(false);
 
+  /* Exposed imperative API */
   const apiRef = useRef({
-    applyTheme:        () => {},
+    applyTheme: () => {},
     setIslandsVisible: () => {},
-    setIntroFinished:  (v) => { introFinishedRef.current = v; },
-    startReturn:       () => {},
+    setIntroFinished: (v) => { introFinishedRef.current = v; },
+    startReturn: () => {},
   });
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    /* ─────────────────────────────────────────────
-       DEVICE DETECTION
-       On mobile we apply a cascade of optimisations:
-         - no antialias, pixel-ratio capped at 1
-         - no shadows anywhere
-         - sequential (not parallel) GLTF loading
-         - fire onAllIslandsLoaded after just the center island
-         - 30 fps render throttle
-         - minimal placeholder geometry
-         - cull tiny detail meshes after each GLTF parse
-    ───────────────────────────────────────────── */
-    const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
-      || window.innerWidth <= 768;
-
-    /* ── Renderer ── */
+    /* ── Renderer ──
+       • antialias disabled on mobile — too expensive on low-end GPUs
+       • pixel ratio uses getSafeDPR() to avoid the Android 4096-buffer bug
+    */
     const renderer = new THREE.WebGLRenderer({
-      antialias:       !isMobile,
-      powerPreference: isMobile ? 'low-power' : 'high-performance',
+      antialias: !isMobile,
+      powerPreference: 'high-performance',
     });
-    renderer.setPixelRatio(isMobile
-      ? Math.min(window.devicePixelRatio, 1)
-      : Math.min(window.devicePixelRatio, 1.5)
-    );
+    renderer.setPixelRatio(getSafeDPR());
     renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.toneMapping         = THREE.ACESFilmicToneMapping;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = THEMES.dark.exposure;
-    renderer.shadowMap.enabled   = !isMobile;
-    if (!isMobile) renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    // Shadows are expensive on mobile; disable them entirely there
+    renderer.shadowMap.enabled = !isMobile;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
     container.appendChild(renderer.domElement);
 
     /* ── Scene ── */
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(THEMES.dark.fog, isMobile ? 0.001 : THEMES.dark.fogDensity);
+    scene.fog = new THREE.FogExp2(THEMES.dark.fog, THEMES.dark.fogDensity);
 
     /* ── Camera ── */
     const camera = new THREE.PerspectiveCamera(55, container.clientWidth / container.clientHeight, 1, 20000);
     camera.position.set(0, 160, 220);
 
-    /* ── Controls ── */
+    /* ── Controls ──
+       Touch feel tweaks for mobile: slightly slower rotate, more damping
+    */
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 30, 0);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
+    controls.dampingFactor = isMobile ? 0.08 : 0.05;
+    controls.rotateSpeed   = isMobile ? 0.5  : 1.0;
+    controls.zoomSpeed     = isMobile ? 0.7  : 1.0;
     controls.maxPolarAngle = Math.PI / 2 - 0.05;
-    controls.minDistance   = 20;
-    controls.maxDistance   = 600;
+    controls.minDistance = 20;
+    controls.maxDistance = 600;
 
     /* ── Lights ── */
     const ambientLight = new THREE.AmbientLight(THEMES.dark.ambientColor, THEMES.dark.ambientIntensity);
@@ -115,78 +152,51 @@ export function useThreeScene(containerRef, callbacks) {
     const dirLight = new THREE.DirectionalLight(THEMES.dark.dirColor, THEMES.dark.dirIntensity);
     dirLight.position.set(50, 100, 50);
     dirLight.castShadow = !isMobile;
-    if (!isMobile) {
-      dirLight.shadow.camera.top    =  200;
-      dirLight.shadow.camera.right  =  200;
-      dirLight.shadow.camera.bottom = -200;
-      dirLight.shadow.camera.left   = -200;
-      dirLight.shadow.camera.near   = 0.1;
-      dirLight.shadow.camera.far    = 500;
-      dirLight.shadow.mapSize.set(1024, 1024);
-      dirLight.shadow.bias = -0.001;
-    }
+    dirLight.shadow.camera.top    =  200;
+    dirLight.shadow.camera.right  =  200;
+    dirLight.shadow.camera.bottom = -200;
+    dirLight.shadow.camera.left   = -200;
+    dirLight.shadow.camera.near = 0.1;
+    dirLight.shadow.camera.far  = 500;
+    // Use a smaller shadow map on mobile — halves GPU memory for shadows
+    dirLight.shadow.mapSize.set(isMobile ? 512 : 1024, isMobile ? 512 : 1024);
+    dirLight.shadow.bias = -0.001;
     scene.add(dirLight);
 
-    /* ─────────────────────────────────────────────
-       PANORAMIC SKY MESHES
-       Uses an inverted sphere instead of scene.background to:
-         1. Fix the mirrored panorama (EquirectangularReflectionMapping
-            mirrors horizontally — it's designed for object reflections)
-         2. Eliminate the geometry seam visible on fast swipes
-    ───────────────────────────────────────────── */
-    const panoramas  = { dark: null, light: null };
-    const skyMeshes  = { dark: null, light: null };
-    const texLoader  = new THREE.TextureLoader();
+    /* ── Panoramic Backgrounds ── */
+    const panoramas = { dark: null, light: null };
+    const texLoader = new THREE.TextureLoader();
     let currentTheme = 'dark';
 
     function makeFallbackTexture(isDark) {
-      const cv  = document.createElement('canvas');
-      cv.width  = 2048; cv.height = 1024;
+      const cv = document.createElement('canvas');
+      cv.width = 2048; cv.height = 1024;
       const ctx = cv.getContext('2d');
       if (isDark) {
         const g = ctx.createLinearGradient(0, 0, 0, 1024);
-        g.addColorStop(0,   '#060d1a');
-        g.addColorStop(0.5, '#0d1f3c');
-        g.addColorStop(1,   '#1a3a5c');
-        ctx.fillStyle = g;
-        ctx.fillRect(0, 0, 2048, 1024);
+        g.addColorStop(0, '#060d1a'); g.addColorStop(0.5, '#0d1f3c'); g.addColorStop(1, '#1a3a5c');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, 2048, 1024);
         for (let i = 0; i < 800; i++) {
           const x = Math.random() * 2048, y = Math.random() * 512, r = Math.random() * 1.5;
           ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(200,220,255,${0.4 + Math.random() * 0.6})`;
-          ctx.fill();
+          ctx.fillStyle = `rgba(200,220,255,${0.4 + Math.random() * 0.6})`; ctx.fill();
         }
       } else {
         const g = ctx.createLinearGradient(0, 0, 0, 1024);
-        g.addColorStop(0,   '#C8EDFF');
-        g.addColorStop(0.6, '#DDF4FF');
-        g.addColorStop(1,   '#EEF8FF');
-        ctx.fillStyle = g;
-        ctx.fillRect(0, 0, 2048, 1024);
+        g.addColorStop(0, '#C8EDFF'); g.addColorStop(0.6, '#DDF4FF'); g.addColorStop(1, '#EEF8FF');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, 2048, 1024);
       }
       const tex = new THREE.CanvasTexture(cv);
+      tex.mapping = THREE.EquirectangularReflectionMapping;
       tex.colorSpace = THREE.SRGBColorSpace;
       return tex;
     }
 
-    function buildSkyMesh(tex) {
-      /* Flip UV horizontally to correct panorama orientation */
-      tex.wrapS = THREE.RepeatWrapping;
-      tex.repeat.set(-1, 1);
-      tex.offset.set(1, 0);
-      const geo  = new THREE.SphereGeometry(9000, 48, 24);
-      const mat  = new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide, depthWrite: false, fog: false });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.renderOrder = -1;
-      return mesh;
-    }
-
     function processPanorama(themeKey, tex) {
-      tex.colorSpace      = THREE.SRGBColorSpace;
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      tex.colorSpace = THREE.SRGBColorSpace;
       panoramas[themeKey] = tex;
-      const mesh          = buildSkyMesh(tex);
-      skyMeshes[themeKey] = mesh;
-      if (themeKey === currentTheme) { scene.background = null; scene.add(mesh); }
+      if (themeKey === currentTheme) scene.background = tex;
       if (themeKey === 'dark') cbRef.current.onPanoReady?.();
     }
 
@@ -195,190 +205,108 @@ export function useThreeScene(containerRef, callbacks) {
         url,
         (tex) => processPanorama(themeKey, tex),
         undefined,
-        ()    => processPanorama(themeKey, makeFallbackTexture(themeKey === 'dark'))
+        () => processPanorama(themeKey, makeFallbackTexture(themeKey === 'dark'))
       );
     }
 
-    loadPanorama('dark',  'Assets/bg.png');
+    loadPanorama('dark', 'Assets/bg.png');
     loadPanorama('light', 'Assets/light bg.png');
 
-    /* ─────────────────────────────────────────────
-       ISLANDS
-    ───────────────────────────────────────────── */
-    const loader  = new GLTFLoader();
+    /* ── Islands ── */
+    const loader = new GLTFLoader();
     const islands = [];
-    let gltfDoneCount = 0;
-
-    /* On mobile, fire onAllIslandsLoaded after just the center island (index 0)
-       so the intro sequence can finish immediately. The other 6 load silently
-       in the background while the user is already exploring.
-       On desktop, wait for all 7 as before.                                   */
-    const readyThreshold = isMobile ? 1 : ISLAND_DEFS.length;
-
-    function onIslandLoaded() {
-      gltfDoneCount++;
-      if (gltfDoneCount === readyThreshold) {
-        cbRef.current.onAllIslandsLoaded?.();
-      }
-    }
+    let loadedCount = 0;
+    const totalIslands = ISLAND_DEFS.length;
 
     function makeUD(def, index) {
       return {
-        originalY:      def.y,
-        floatSpeed:     0.4 + Math.random() * 0.4,
-        floatOffset:    Math.random() * Math.PI * 2,
-        rotationSpeed:  def.isCenterIsland ? 0.0008 : (Math.random() - 0.5) * 0.002,
-        isIsland:       true,
-        id:             index,
+        originalY: def.y,
+        floatSpeed: 0.4 + Math.random() * 0.4,
+        floatOffset: Math.random() * Math.PI * 2,
+        rotationSpeed: def.isCenterIsland ? 0.0008 : (Math.random() - 0.5) * 0.002,
+        isIsland: true,
+        id: index,
         isCenterIsland: !!def.isCenterIsland,
       };
     }
 
-    /* ── Placeholder geometry ──────────────────────────────────────────────
-       Desktop : detailed rock + grass + trees (visual fidelity during load)
-       Mobile  : single low-poly octahedron — near-zero CPU/GPU cost, no
-                 tree/trunk/leaf meshes to allocate and upload to the GPU.
-    ──────────────────────────────────────────────────────────────────────── */
     function makePlaceholder(def, index) {
       const g = new THREE.Group();
+      const rock = new THREE.Mesh(
+        new THREE.DodecahedronGeometry(def.isCenterIsland ? 38 : 30, 1),
+        new THREE.MeshStandardMaterial({ color: 0x7a6a55, roughness: 0.9, flatShading: true })
+      );
+      rock.castShadow = rock.receiveShadow = !isMobile;
+      g.add(rock);
 
-      if (isMobile) {
-        const blob = new THREE.Mesh(
-          new THREE.OctahedronGeometry(def.isCenterIsland ? 28 : 20, 1),
-          new THREE.MeshStandardMaterial({ color: 0x556677, roughness: 0.9, flatShading: true })
-        );
-        g.add(blob);
-      } else {
-        const rock = new THREE.Mesh(
-          new THREE.DodecahedronGeometry(def.isCenterIsland ? 38 : 30, 1),
-          new THREE.MeshStandardMaterial({ color: 0x7a6a55, roughness: 0.9, flatShading: true })
-        );
-        rock.castShadow = rock.receiveShadow = true;
-        g.add(rock);
+      const grass = new THREE.Mesh(
+        new THREE.CylinderGeometry(28, 22, 10, 7),
+        new THREE.MeshStandardMaterial({ color: 0x4a7c38, roughness: 0.8, flatShading: true })
+      );
+      grass.position.y = 28; grass.castShadow = grass.receiveShadow = !isMobile; g.add(grass);
 
-        const grass = new THREE.Mesh(
-          new THREE.CylinderGeometry(28, 22, 10, 7),
-          new THREE.MeshStandardMaterial({ color: 0x4a7c38, roughness: 0.8, flatShading: true })
+      const tc = def.isCenterIsland ? 5 : 3;
+      const tr = def.isCenterIsland ? 16 : 12;
+      for (let t = 0; t < tc; t++) {
+        const tg = new THREE.Group();
+        const trunk = new THREE.Mesh(
+          new THREE.CylinderGeometry(1.5, 2.4, 12, 5),
+          new THREE.MeshStandardMaterial({ color: 0x4a3728 })
         );
-        grass.position.y = 28; grass.castShadow = grass.receiveShadow = true; g.add(grass);
-
-        const tc = def.isCenterIsland ? 5 : 3;
-        const tr = def.isCenterIsland ? 16 : 12;
-        for (let t = 0; t < tc; t++) {
-          const tg    = new THREE.Group();
-          const trunk = new THREE.Mesh(
-            new THREE.CylinderGeometry(1.5, 2.4, 12, 5),
-            new THREE.MeshStandardMaterial({ color: 0x4a3728 })
-          );
-          trunk.position.y = 6; tg.add(trunk);
-          const leaves = new THREE.Mesh(
-            new THREE.ConeGeometry(9, 18, 5),
-            new THREE.MeshStandardMaterial({ color: 0x2d5a27, flatShading: true })
-          );
-          leaves.position.y = 18; tg.add(leaves);
-          const a = (t / tc) * Math.PI * 2;
-          tg.position.set(Math.cos(a) * tr, 30, Math.sin(a) * tr);
-          tg.rotation.y = Math.random() * Math.PI;
-          g.add(tg);
-        }
+        trunk.position.y = 6; tg.add(trunk);
+        const leaves = new THREE.Mesh(
+          new THREE.ConeGeometry(9, 18, 5),
+          new THREE.MeshStandardMaterial({ color: 0x2d5a27, flatShading: true })
+        );
+        leaves.position.y = 18; tg.add(leaves);
+        const a = (t / tc) * Math.PI * 2;
+        tg.position.set(Math.cos(a) * tr, 30, Math.sin(a) * tr);
+        tg.rotation.y = Math.random() * Math.PI;
+        g.add(tg);
       }
 
       g.position.set(def.x, def.y, def.z);
       g.scale.setScalar(def.scale / 3);
       g.userData = makeUD(def, index);
-      g.visible  = false;
+      g.visible = false;
       scene.add(g);
       islands.push(g);
     }
 
-    /* ── Post-load mesh processing ─────────────────────────────────────────
-       On mobile, after each GLTF parses we hide child meshes whose local
-       bounding sphere radius is below a threshold. These are tiny decorative
-       details (pebbles, bolts, leaf clusters) that add GPU draw calls but
-       are effectively invisible at normal viewing distances on a small screen.
-    ──────────────────────────────────────────────────────────────────────── */
-    const MOBILE_CULL_RADIUS = 1.5; /* world-space units */
-    const _bbox = new THREE.Box3();
-    const _bsph = new THREE.Sphere();
-    const _ws   = new THREE.Vector3();
-
-    function prepareIslandMesh(island) {
-      island.traverse((child) => {
-        if (!child.isMesh) return;
-
-        child.castShadow    = !isMobile;
-        child.receiveShadow = !isMobile;
-
-        if (child.material) {
-          child.material.envMapIntensity = THEMES[currentTheme].envMapIntensity;
-          if (!isMobile) {
-            child.material.roughness = Math.max(child.material.roughness ?? 0.5, 0.2);
-          }
-        }
-
-        /* Cull micro-detail meshes on mobile */
-        if (isMobile && child.geometry) {
-          child.geometry.computeBoundingBox();
-          _bbox.copy(child.geometry.boundingBox);
-          _bbox.getBoundingSphere(_bsph);
-          child.getWorldScale(_ws);
-          const worldRadius = _bsph.radius * Math.max(_ws.x, _ws.y, _ws.z);
-          if (worldRadius < MOBILE_CULL_RADIUS) child.visible = false;
-        }
-      });
+    function onIslandLoaded() {
+      loadedCount++;
+      if (loadedCount === totalIslands) {
+        cbRef.current.onAllIslandsLoaded?.();
+      }
     }
 
-    /* ─────────────────────────────────────────────
-       SEQUENTIAL vs PARALLEL LOADING
-
-       Desktop : fire all 7 fetches at once — HTTP/2 handles parallelism
-                 efficiently and GPUs handle concurrent uploads fine.
-
-       Mobile  : load one island at a time with a 150 ms gap between each.
-                 This prevents 7 simultaneous GLTF parse + GPU-upload jobs
-                 from locking the main thread for several seconds on mid/low-end
-                 phones. The gap lets the browser paint frames and stay responsive.
-                 Island 0 (center) loads first so the user can interact immediately.
-    ───────────────────────────────────────────── */
-    const MOBILE_LOAD_DELAY_MS = 150;
-
-    function loadSingleIsland(def, i, onDone) {
+    ISLAND_DEFS.forEach((def, i) => {
       loader.load(
         def.file,
         (gltf) => {
           const island = gltf.scene;
           island.position.set(def.x, def.y, def.z);
           island.scale.setScalar(def.scale);
-          prepareIslandMesh(island);
+          island.traverse((child) => {
+            if (child.isMesh) {
+              // On mobile, skip shadow casting/receiving to save draw calls
+              child.castShadow = child.receiveShadow = !isMobile;
+              if (child.material) {
+                child.material.envMapIntensity = THEMES[currentTheme].envMapIntensity;
+                child.material.roughness = Math.max(child.material.roughness ?? 0.5, 0.2);
+              }
+            }
+          });
           island.userData = makeUD(def, i);
-          island.visible  = false;
+          island.visible = false;
           scene.add(island);
           islands.push(island);
           onIslandLoaded();
-          onDone?.();
         },
         undefined,
-        () => {
-          makePlaceholder(def, i);
-          onIslandLoaded();
-          onDone?.();
-        }
+        () => { makePlaceholder(def, i); onIslandLoaded(); }
       );
-    }
-
-    if (isMobile) {
-      /* Sequential queue — island 0 first, then 1–6 with breathing room */
-      let queueIndex = 0;
-      function loadNext() {
-        if (queueIndex >= ISLAND_DEFS.length) return;
-        const i   = queueIndex++;
-        loadSingleIsland(ISLAND_DEFS[i], i, () => setTimeout(loadNext, MOBILE_LOAD_DELAY_MS));
-      }
-      loadNext();
-    } else {
-      /* Parallel — all at once for fastest desktop load */
-      ISLAND_DEFS.forEach((def, i) => loadSingleIsland(def, i, null));
-    }
+    });
 
     /* ── Camera Transitions ── */
     const ISLAND_FOCUS_DEFS = {
@@ -391,13 +319,13 @@ export function useThreeScene(containerRef, callbacks) {
       6: { pos: new THREE.Vector3(Math.cos(d(300)) * 55, 70, Math.sin(d(300)) * 55),      target: new THREE.Vector3(Math.cos(d(300)) * ORBIT_R, 30, Math.sin(d(300)) * ORBIT_R) },
     };
 
-    let viewMode           = 'overview';
-    let focusedIsland      = null;
-    const overviewCamPos   = new THREE.Vector3(0, 160, 220);
-    const overviewTarget   = new THREE.Vector3(0, 30, 0);
-    let transProgress      = 0;
+    let viewMode = 'overview';
+    let focusedIsland = null;
+    const overviewCamPos = new THREE.Vector3(0, 160, 220);
+    const overviewTarget  = new THREE.Vector3(0, 30, 0);
+    let transProgress = 0;
     let transitionComplete = false;
-    const TRANS_SPEED      = 0.012;
+    const TRANS_SPEED = 0.012;
     let bzP0, bzP1, bzP2, bzP3, lookFrom, lookTo;
 
     function easeInOut(t) {
@@ -408,7 +336,7 @@ export function useThreeScene(containerRef, callbacks) {
       const u = 1 - t, tt = t * t, uu = u * u;
       return P0.clone().multiplyScalar(uu * u)
         .add(P1.clone().multiplyScalar(3 * uu * t))
-        .add(P2.clone().multiplyScalar(3 * u  * tt))
+        .add(P2.clone().multiplyScalar(3 * u * tt))
         .add(P3.clone().multiplyScalar(tt * t));
     }
 
@@ -436,8 +364,8 @@ export function useThreeScene(containerRef, callbacks) {
     }
 
     /* ── Raycasting / Click ── */
-    const raycaster  = new THREE.Raycaster();
-    const mouse      = new THREE.Vector2();
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
     let mouseDownPos = { x: 0, y: 0 };
 
     function pick(clientX, clientY) {
@@ -455,10 +383,12 @@ export function useThreeScene(containerRef, callbacks) {
     }
 
     const onMouseDown = (e) => { mouseDownPos = { x: e.clientX, y: e.clientY }; };
-    const onMouseUp   = (e) => {
+    const onMouseUp = (e) => {
       if (Math.hypot(e.clientX - mouseDownPos.x, e.clientY - mouseDownPos.y) > 5) return;
       if (viewMode === 'transitioning-in' || viewMode === 'transitioning-out') return;
+
       const clicked = pick(e.clientX, e.clientY);
+
       if (viewMode === 'overview' && clicked) {
         overviewCamPos.copy(camera.position);
         overviewTarget.copy(controls.target);
@@ -469,19 +399,24 @@ export function useThreeScene(containerRef, callbacks) {
       }
     };
 
-    let touchStart     = { x: 0, y: 0 };
-    const onTouchStart = (e) => { touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; };
-    const onTouchEnd   = (e) => {
+    // Increase the tap-drift tolerance on mobile since finger touches
+    // are less precise than mouse clicks
+    const TAP_TOLERANCE = isMobile ? 18 : 10;
+    let touchStart = { x: 0, y: 0 };
+    const onTouchStart = (e) => {
+      touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    };
+    const onTouchEnd = (e) => {
       const t = e.changedTouches[0];
       if (!t) return;
-      if (Math.hypot(t.clientX - touchStart.x, t.clientY - touchStart.y) > 10) return;
+      if (Math.hypot(t.clientX - touchStart.x, t.clientY - touchStart.y) > TAP_TOLERANCE) return;
       onMouseUp({ clientX: t.clientX, clientY: t.clientY });
     };
 
-    renderer.domElement.addEventListener('mousedown',  onMouseDown);
-    renderer.domElement.addEventListener('mouseup',    onMouseUp);
+    renderer.domElement.addEventListener('mousedown', onMouseDown);
+    renderer.domElement.addEventListener('mouseup', onMouseUp);
     renderer.domElement.addEventListener('touchstart', onTouchStart, { passive: true });
-    renderer.domElement.addEventListener('touchend',   onTouchEnd,   { passive: true });
+    renderer.domElement.addEventListener('touchend', onTouchEnd, { passive: true });
 
     /* ── Transition Tick ── */
     function tickTransition() {
@@ -513,23 +448,12 @@ export function useThreeScene(containerRef, callbacks) {
       }
     }
 
-    /* ─────────────────────────────────────────────
-       RENDER LOOP
-       Mobile: throttle to ~30 fps by skipping frames
-       whose delta falls below the 33 ms budget.
-       This alone halves the GPU workload on mobile.
-    ───────────────────────────────────────────── */
-    const clock     = new THREE.Clock();
-    const TARGET_MS = isMobile ? 1000 / 30 : 0; /* 0 = uncapped on desktop */
-    let lastFrameMs = 0;
+    /* ── Render Loop ── */
+    const clock = new THREE.Clock();
     let animId;
 
     function animate(now) {
       animId = requestAnimationFrame(animate);
-
-      if (isMobile && now - lastFrameMs < TARGET_MS) return;
-      lastFrameMs = now;
-
       const time = clock.getElapsedTime();
       controls.update();
       tickTransition();
@@ -547,12 +471,18 @@ export function useThreeScene(containerRef, callbacks) {
 
     animate(0);
 
-    /* ── Resize ── */
+    /* ── Resize ──
+       IMPORTANT: getSafeDPR() must be re-called on every resize.
+       Rotating the phone swaps innerWidth/innerHeight, which can
+       re-trigger (or resolve) the Android 4096-buffer overflow.
+    */
     const onResize = () => {
-      const w = container.clientWidth, h = container.clientHeight;
+      const w = container.clientWidth;
+      const h = container.clientHeight;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
+      renderer.setPixelRatio(getSafeDPR()); // recalculate after orientation change
     };
     window.addEventListener('resize', onResize);
 
@@ -562,23 +492,13 @@ export function useThreeScene(containerRef, callbacks) {
         currentTheme = theme;
         const t = THEMES[theme];
         scene.fog.color.setHex(t.fog);
-        scene.fog.density = isMobile ? 0.001 : t.fogDensity;
+        scene.fog.density = t.fogDensity;
         ambientLight.color.setHex(t.ambientColor);
         ambientLight.intensity = t.ambientIntensity;
         dirLight.color.setHex(t.dirColor);
         dirLight.intensity = t.dirIntensity;
         renderer.toneMappingExposure = t.exposure;
-
-        /* Swap sky meshes */
-        const prev = theme === 'dark' ? 'light' : 'dark';
-        if (skyMeshes[prev])  scene.remove(skyMeshes[prev]);
-        if (skyMeshes[theme]) {
-          scene.add(skyMeshes[theme]);
-          scene.background = null;
-        } else if (panoramas[theme]) {
-          scene.background = panoramas[theme];
-        }
-
+        if (panoramas[theme]) scene.background = panoramas[theme];
         islands.forEach((isl) => {
           isl.traverse((child) => {
             if (child.isMesh && child.material) {
@@ -600,18 +520,21 @@ export function useThreeScene(containerRef, callbacks) {
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', onResize);
-      renderer.domElement.removeEventListener('mousedown',  onMouseDown);
-      renderer.domElement.removeEventListener('mouseup',    onMouseUp);
+      renderer.domElement.removeEventListener('mousedown', onMouseDown);
+      renderer.domElement.removeEventListener('mouseup', onMouseUp);
       renderer.domElement.removeEventListener('touchstart', onTouchStart);
-      renderer.domElement.removeEventListener('touchend',   onTouchEnd);
+      renderer.domElement.removeEventListener('touchend', onTouchEnd);
       controls.dispose();
       renderer.dispose();
-      if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement);
+      if (container.contains(renderer.domElement)) {
+        container.removeChild(renderer.domElement);
+      }
+      // Reset API
       apiRef.current = {
-        applyTheme:        () => {},
+        applyTheme: () => {},
         setIslandsVisible: () => {},
-        setIntroFinished:  () => {},
-        startReturn:       () => {},
+        setIntroFinished: () => {},
+        startReturn: () => {},
       };
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
