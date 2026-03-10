@@ -109,11 +109,13 @@ function loadPanoramaTexture(url, isMobile, onSuccess, onError) {
       });
     })
     .then((source) => {
-      const tex = source instanceof ImageBitmap
-        ? new THREE.CanvasTexture(source)  // from resized bitmap (off-thread path)
-        : new THREE.CanvasTexture(source); // from fallback canvas (sync path)
-      tex.mapping    = THREE.EquirectangularReflectionMapping;
-      tex.colorSpace = THREE.SRGBColorSpace;
+      const tex = new THREE.CanvasTexture(source);
+      tex.mapping         = THREE.EquirectangularReflectionMapping;
+      tex.colorSpace      = THREE.SRGBColorSpace;
+      tex.flipY           = false;  // CanvasTexture defaults to true; equirect backgrounds must be false
+      tex.generateMipmaps = false;  // prevents visible cubemap-conversion geometry on fast swipes
+      tex.minFilter       = THREE.LinearFilter;
+      tex.magFilter       = THREE.LinearFilter;
       onSuccess(tex);
     })
     .catch(onError);
@@ -217,8 +219,12 @@ export function useThreeScene(containerRef, callbacks) {
         ctx.fillStyle = g; ctx.fillRect(0, 0, 2048, 1024);
       }
       const tex = new THREE.CanvasTexture(cv);
-      tex.mapping = THREE.EquirectangularReflectionMapping;
-      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.mapping         = THREE.EquirectangularReflectionMapping;
+      tex.colorSpace      = THREE.SRGBColorSpace;
+      tex.flipY           = false;
+      tex.generateMipmaps = false;
+      tex.minFilter       = THREE.LinearFilter;
+      tex.magFilter       = THREE.LinearFilter;
       return tex;
     }
 
