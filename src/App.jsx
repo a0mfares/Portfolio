@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import ThreeCanvas from './components/ThreeCanvas';
 import IntroOverlay from './components/IntroOverlay';
 import HoloScene from './components/HoloScene';
@@ -197,6 +198,9 @@ export default function App() {
           instructionsVisible={instructionsVisible}
         />
       )}
+
+      {/* Vercel Analytics */}
+      <Analytics />
     </>
   );
 }
