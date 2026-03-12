@@ -15,12 +15,14 @@ const THEMES = {
     ambientColor: 0x5588a0, ambientIntensity: 5,
     dirColor: 0x88b8d0, dirIntensity: 5,
     exposure: 0.8, envMapIntensity: 0.08,
+    panoUrl: 'Assets/bg.webp',
   },
   light: {
     fog: 0xDDF4FF, fogDensity: 0.0015,
     ambientColor: 0xffffff, ambientIntensity: 0.9,
     dirColor: 0xfff6e0, dirIntensity: 1.8,
     exposure: 0.78, envMapIntensity: 0.35,
+    panoUrl: 'Assets/light bg.webp',
   },
 };
 
@@ -124,6 +126,7 @@ export function useThreeScene(containerRef, callbacks) {
     renderer.toneMappingExposure = THEMES.dark.exposure;
     renderer.shadowMap.enabled = !isMobile;   // shadows off on mobile
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.setClearColor(THEMES.dark.fog, 1);   // match fog so no seam shows past panorama
     container.appendChild(renderer.domElement);
 
     /* ── Scene ── */
@@ -148,7 +151,7 @@ export function useThreeScene(containerRef, callbacks) {
     controls.dampingFactor = 0.05;
     controls.maxPolarAngle = Math.PI / 2 - 0.05;
     controls.minDistance = 20;
-    controls.maxDistance = 600;
+    controls.maxDistance = isMobile ? 300 : 600;   // tighter on mobile to prevent seeing past panorama
 
     /* ── Lights ── */
     const ambientLight = new THREE.AmbientLight(
@@ -228,8 +231,13 @@ export function useThreeScene(containerRef, callbacks) {
       );
     }
 
-    loadPanorama('dark', 'Assets/bg.png');
-    loadPanorama('light', 'Assets/light bg.png');
+    // Load current theme panorama first for better LCP
+    loadPanorama(currentTheme, THEMES[currentTheme].panoUrl);
+    // Lazily load the other theme
+    setTimeout(() => {
+      const otherTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      loadPanorama(otherTheme, THEMES[otherTheme].panoUrl);
+    }, 2000);
 
     /* ── DRACO + GLTF Loader ── */
     const dracoLoader = new DRACOLoader();
@@ -391,8 +399,20 @@ export function useThreeScene(containerRef, callbacks) {
         }
       })();
     } else {
-      /* Desktop: parallel loading, uncapped frame rate */
-      ISLAND_DEFS.forEach((def, i) => loadIsland(def, i));
+      /* Desktop: Priority-based loading */
+      // Load center island first
+      const centerDef = ISLAND_DEFS.find(d => d.isCenterIsland);
+      const centerIdx = ISLAND_DEFS.indexOf(centerDef);
+      if (centerDef) {
+        loadIsland(centerDef, centerIdx);
+      }
+
+      // Load others with a slight staggered delay to avoid competing for bandwidth
+      ISLAND_DEFS.forEach((def, i) => {
+        if (!def.isCenterIsland) {
+          setTimeout(() => loadIsland(def, i), 100 + i * 50);
+        }
+      });
     }
 
     /* ── Camera Transitions ── */
@@ -587,6 +607,7 @@ export function useThreeScene(containerRef, callbacks) {
         const t = THEMES[theme];
         scene.fog.color.setHex(t.fog);
         scene.fog.density = t.fogDensity;
+        renderer.setClearColor(t.fog, 1);   // keep clear color in sync with fog
         ambientLight.color.setHex(t.ambientColor);
         ambientLight.intensity = t.ambientIntensity;
         dirLight.color.setHex(t.dirColor);
@@ -621,6 +642,27 @@ export function useThreeScene(containerRef, callbacks) {
       controls.dispose();
       dracoLoader.dispose();   // release WASM decoder
       renderer.dispose();
+
+      // Dispose of panoramas
+      if (panoramas.dark) panoramas.dark.dispose();
+      if (panoramas.light) panoramas.light.dispose();
+
+      // Dispose of island materials/geometries
+      islands.forEach(isl => {
+        isl.traverse(child => {
+          if (child.isMesh) {
+            child.geometry.dispose();
+            if (child.material) {
+              if (Array.isArray(child.material)) {
+                child.material.forEach(m => m.dispose());
+              } else {
+                child.material.dispose();
+              }
+            }
+          }
+        });
+      });
+
       if (container.contains(renderer.domElement)) {
         container.removeChild(renderer.domElement);
       }
