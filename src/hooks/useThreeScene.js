@@ -147,6 +147,7 @@ export function useThreeScene(containerRef, callbacks) {
           : Math.min(window.devicePixelRatio, 1.5)
       );
       renderer.setSize(container.clientWidth, container.clientHeight);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;   // correct sRGB for GLTF textures
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = THEMES.dark.exposure;
       renderer.shadowMap.enabled = !isMobile;   // shadows off on mobile
