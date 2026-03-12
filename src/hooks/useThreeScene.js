@@ -50,7 +50,6 @@ const ISLAND_DEFS = [
      We also re-run this calculation on every resize because
      orientation changes swap width/height and can re-trigger the bug.
 ───────────────────────────────────────────────────────────────── */
-const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 const isAndroidChrome =
   /Android/i.test(navigator.userAgent) && /Chrome/i.test(navigator.userAgent);
 const MAX_ANDROID_BUFFER = 4096;
@@ -92,15 +91,12 @@ function getSafeDPR() {
  */
 export function useThreeScene(containerRef, callbacks) {
   /* Keep callbacks in a ref so the animation loop always reads the latest version */
-  /* Keep callbacks in a ref so the animation loop always reads the latest version */
   const cbRef = useRef(callbacks);
   cbRef.current = callbacks;
 
   /* Flags the hook consumer can mutate without re-renders */
-  /* Flags the hook consumer can mutate without re-renders */
   const introFinishedRef = useRef(false);
 
-  /* Exposed imperative API */
   /* Exposed imperative API */
   const apiRef = useRef({
     applyTheme: () => { },
@@ -132,7 +128,6 @@ export function useThreeScene(containerRef, callbacks) {
 
     /* ── Scene ── */
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(THEMES.dark.fog, THEMES.dark.fogDensity);
     scene.fog = new THREE.FogExp2(THEMES.dark.fog, THEMES.dark.fogDensity);
 
     /* ── Camera ── */
@@ -193,18 +188,13 @@ export function useThreeScene(containerRef, callbacks) {
         const g = ctx.createLinearGradient(0, 0, 0, 1024);
         g.addColorStop(0, '#060d1a'); g.addColorStop(0.5, '#0d1f3c'); g.addColorStop(1, '#1a3a5c');
         ctx.fillStyle = g; ctx.fillRect(0, 0, 2048, 1024);
-        g.addColorStop(0, '#060d1a'); g.addColorStop(0.5, '#0d1f3c'); g.addColorStop(1, '#1a3a5c');
-        ctx.fillStyle = g; ctx.fillRect(0, 0, 2048, 1024);
         for (let i = 0; i < 800; i++) {
           const x = Math.random() * 2048, y = Math.random() * 512, r = Math.random() * 1.5;
           ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
           ctx.fillStyle = `rgba(200,220,255,${0.4 + Math.random() * 0.6})`; ctx.fill();
-          ctx.fillStyle = `rgba(200,220,255,${0.4 + Math.random() * 0.6})`; ctx.fill();
         }
       } else {
         const g = ctx.createLinearGradient(0, 0, 0, 1024);
-        g.addColorStop(0, '#C8EDFF'); g.addColorStop(0.6, '#DDF4FF'); g.addColorStop(1, '#EEF8FF');
-        ctx.fillStyle = g; ctx.fillRect(0, 0, 2048, 1024);
         g.addColorStop(0, '#C8EDFF'); g.addColorStop(0.6, '#DDF4FF'); g.addColorStop(1, '#EEF8FF');
         ctx.fillStyle = g; ctx.fillRect(0, 0, 2048, 1024);
       }
@@ -342,7 +332,6 @@ export function useThreeScene(containerRef, callbacks) {
         },
         undefined,
         () => { makePlaceholder(def, i); onIslandLoaded(); }
-        () => { makePlaceholder(def, i); onIslandLoaded(); }
       );
     }
 
@@ -434,7 +423,6 @@ export function useThreeScene(containerRef, callbacks) {
       const u = 1 - t, tt = t * t, uu = u * u;
       return P0.clone().multiplyScalar(uu * u)
         .add(P1.clone().multiplyScalar(3 * uu * t))
-        .add(P2.clone().multiplyScalar(3 * u * tt))
         .add(P2.clone().multiplyScalar(3 * u * tt))
         .add(P3.clone().multiplyScalar(tt * t));
     }
@@ -546,7 +534,6 @@ export function useThreeScene(containerRef, callbacks) {
     /* ── Render Loop ── */
     const clock = new THREE.Clock();
     /* ── Render Loop ── */
-    const clock = new THREE.Clock();
     let animId;
     let lastFrameTime = 0;
     const MOBILE_FRAME_INTERVAL = 1000 / 30; // 30 fps cap on mobile
@@ -586,8 +573,6 @@ export function useThreeScene(containerRef, callbacks) {
     const onResize = () => {
       const w = container.clientWidth;
       const h = container.clientHeight;
-      const w = container.clientWidth;
-      const h = container.clientHeight;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
@@ -602,13 +587,11 @@ export function useThreeScene(containerRef, callbacks) {
         const t = THEMES[theme];
         scene.fog.color.setHex(t.fog);
         scene.fog.density = t.fogDensity;
-        scene.fog.density = t.fogDensity;
         ambientLight.color.setHex(t.ambientColor);
         ambientLight.intensity = t.ambientIntensity;
         dirLight.color.setHex(t.dirColor);
         dirLight.intensity = t.dirIntensity;
         renderer.toneMappingExposure = t.exposure;
-        if (panoramas[theme]) scene.background = panoramas[theme];
         if (panoramas[theme]) scene.background = panoramas[theme];
         islands.forEach((isl) => {
           isl.traverse((child) => {
